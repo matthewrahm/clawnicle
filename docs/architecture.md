@@ -118,9 +118,31 @@ Invalidation of the cache is by changing the hash: editing the prompt, switching
 
 Cancellation is cooperative — user closures in flight are not interrupted. For hard interruption of a stuck closure, use `RetryPolicy::with_timeout`. External callers (scheduler, CLI, signal handler) cancel by calling `token.cancel()` on any clone of the token.
 
+## Scheduler and crash recovery
+
+`clawnicle-exec::Scheduler` runs many workflows concurrently in one process. The API is small:
+
+```text
+Scheduler::new(db_path) -> Scheduler
+Scheduler::with_concurrency(n)
+Scheduler::register(name, async fn(Context, Value) -> Result<Value>)
+Scheduler::submit(id, name, input) -> Result<()>
+Scheduler::run_until_idle() -> RunStats { completed, failed, recovered }
+```
+
+`submit` writes a `status = 'pending'` row to the `workflows` table. No events are written at submit time; the `WorkflowStarted` event is deferred to claim time, so a workflow that never gets picked up has zero event rows.
+
+`run_until_idle` does two things in order:
+
+1. **Recovery scan.** `Journal::recover_abandoned` flips every `running` row back to `pending`. In a single-process deployment this is safe because any `running` row must be from a prior process that crashed; nothing in the current process has started yet. Multi-process coordination (leases, heartbeats) is post-v0.
+
+2. **Pull loop.** Repeatedly call `Journal::claim_next_pending`, which uses `BEGIN IMMEDIATE` to atomically select the oldest `pending`, flip it to `running`, append its `WorkflowStarted` event, and return `(id, name, input)`. Each claim spawns a Tokio task bounded by a `Semaphore` sized to `concurrency`. The task opens its own `Journal` handle on the same SQLite file (WAL mode permits concurrent readers alongside one writer), constructs a `Context`, and invokes the registered handler. On `Ok`, the handler's `cx.complete(&output)` has already flipped status to `completed`. On `Err`, the scheduler appends a `WorkflowFailed` event so status becomes `failed`.
+
+Handlers register by name; submit passes the name plus input. If a workflow is submitted with a name that isn't registered, the scheduler logs one `WorkflowFailed` and moves on — it does not loop on the row forever.
+
 ## What is NOT in v0
 
-- **No scheduler.** Workflows run in-process, one at a time. The scheduler arrives in Week 4.
+- **No multi-process scheduler coordination.** One Scheduler per process. Multi-process deployments would need leases or heartbeats to stop two processes from both running the same workflow; that is post-v0.
 - **No LLM caching.** `LlmCallCompleted` is reserved in the event enum but not wired up until the LLM provider lands in Week 4.
 - **No sub-workflows.** `parent_id` is a placeholder column.
 - **No distributed workers.** Single process only. Multi-node is post-v0.

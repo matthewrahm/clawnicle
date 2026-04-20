@@ -29,6 +29,7 @@ Clawnicle is a Rust library. You write your agent workflow as a normal async fun
 - **Cooperative cancellation.** Clone a `CancelToken`, call `cancel()` from anywhere, and the runtime bails at the next suspension point.
 - **LLM-aware prompt caching.** `complete_llm(provider, request)` hashes `(model, messages, temperature, max_tokens)` and stores the response; re-requesting the same prompt returns the cached completion without touching the provider.
 - **Inspection CLI.** `clawnicle list / show / events` walks any journal — no special tooling needed.
+- **Scheduler.** `clawnicle-exec::Scheduler` runs submitted workflows concurrently (bounded by a semaphore), picks up any workflows left `running` by a prior process on startup, and reports completed/failed/recovered counts when idle.
 
 ## Example
 
@@ -108,6 +109,7 @@ crates/
   clawnicle-journal    SQLite-backed append-only event log
   clawnicle-llm        LlmProvider trait + MockProvider + AnthropicProvider
   clawnicle-runtime    Context API + replay engine + LLM caching
+  clawnicle-exec       Scheduler with bounded concurrency + crash recovery
   clawnicle-cli        `clawnicle` binary for inspecting journals
 examples/
   hello                minimal two-event workflow trace
