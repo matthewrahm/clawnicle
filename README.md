@@ -4,7 +4,7 @@ Durable agent runtime for Rust. Write LLM agent workflows as ordinary async func
 
 > Temporal's durable-execution model, redesigned for LLM agents.
 
-**Status:** v0 in progress. Week 1 ships workspace, event schema, SQLite journal, and a hello example.
+**Status:** v0 in progress. Weeks 1–2 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, and a runnable crash-and-resume demo.
 
 ## Why
 
@@ -34,20 +34,33 @@ async fn scan_token(cx: Context, token: TokenId) -> Result<Verdict> {
 
 ```
 crates/
-  clawnicle-core      → event model, errors, shared types
-  clawnicle-journal   → SQLite-backed append-only event log
+  clawnicle-core       → event model, errors, shared types
+  clawnicle-journal    → SQLite-backed append-only event log
+  clawnicle-runtime    → Context API + replay engine
 examples/
-  hello               → minimal two-event workflow trace
+  hello                → minimal two-event workflow trace
+  resume-demo          → three-step workflow that crashes and resumes
 docs/
-  architecture.md     → event model, replay semantics, determinism contract
+  architecture.md      → event model, replay semantics, determinism contract
 ```
 
 ## Quickstart
 
 ```bash
 cargo test
+
+# Two-event journal trace
 cargo run -p hello-clawnicle
+
+# Crash-and-resume demo — run once to see step-b fail, then rerun with
+# CLAWNICLE_HEAL=1 to see step-a short-circuit from the journal and the
+# workflow complete.
+cargo run -p resume-demo
+CLAWNICLE_HEAL=1 cargo run -p resume-demo
+cargo run -p resume-demo  # already-complete path
 ```
+
+Read [`docs/architecture.md`](docs/architecture.md) for the event model, replay semantics, and determinism contract.
 
 ## License
 
