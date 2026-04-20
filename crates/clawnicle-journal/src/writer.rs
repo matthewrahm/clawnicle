@@ -6,6 +6,16 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::schema::SCHEMA_SQL;
 
+#[derive(Debug, Clone)]
+pub struct WorkflowSummary {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub event_count: i64,
+}
+
 pub struct Journal {
     conn: Connection,
 }
@@ -77,6 +87,65 @@ impl Journal {
 
         tx.commit().map_err(journal_err)?;
         Ok(seq)
+    }
+
+    pub fn list_workflows(&self) -> Result<Vec<WorkflowSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"SELECT w.id, w.name, w.status, w.created_at, w.updated_at,
+                          COALESCE(e.cnt, 0) AS event_count
+                   FROM workflows w
+                   LEFT JOIN (
+                       SELECT workflow_id, COUNT(*) AS cnt
+                       FROM events
+                       GROUP BY workflow_id
+                   ) e ON e.workflow_id = w.id
+                   ORDER BY w.updated_at DESC"#,
+            )
+            .map_err(journal_err)?;
+
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(WorkflowSummary {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    status: r.get(2)?,
+                    created_at_ms: r.get(3)?,
+                    updated_at_ms: r.get(4)?,
+                    event_count: r.get(5)?,
+                })
+            })
+            .map_err(journal_err)?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(journal_err)?);
+        }
+        Ok(out)
+    }
+
+    pub fn workflow_summary(&self, workflow_id: &str) -> Result<Option<WorkflowSummary>> {
+        self.conn
+            .query_row(
+                r#"SELECT w.id, w.name, w.status, w.created_at, w.updated_at,
+                          (SELECT COUNT(*) FROM events WHERE workflow_id = w.id) AS event_count
+                   FROM workflows w
+                   WHERE w.id = ?1"#,
+                params![workflow_id],
+                |r| {
+                    Ok(WorkflowSummary {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        status: r.get(2)?,
+                        created_at_ms: r.get(3)?,
+                        updated_at_ms: r.get(4)?,
+                        event_count: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(journal_err)
     }
 
     pub fn workflow_status(&self, workflow_id: &str) -> Result<Option<String>> {
@@ -311,6 +380,40 @@ mod tests {
         assert_eq!(a[1].sequence, 2);
         assert_eq!(b[0].sequence, 1);
         assert_eq!(b[1].sequence, 2);
+    }
+
+    #[test]
+    fn list_workflows_orders_by_updated_at_desc_with_event_counts() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+
+        journal.start_workflow("a", "first", "h", None).unwrap();
+        journal.start_workflow("b", "second", "h", None).unwrap();
+        journal
+            .append(
+                "a",
+                &EventPayload::ToolCallCompleted {
+                    step_id: "s".into(),
+                    output: serde_json::json!({}),
+                    duration_ms: 1,
+                },
+            )
+            .unwrap();
+
+        let workflows = journal.list_workflows().unwrap();
+        assert_eq!(workflows.len(), 2);
+        // 'a' has 2 events (Started + ToolCallCompleted), 'b' has 1.
+        let a = workflows.iter().find(|w| w.id == "a").unwrap();
+        let b = workflows.iter().find(|w| w.id == "b").unwrap();
+        assert_eq!(a.event_count, 2);
+        assert_eq!(b.event_count, 1);
+    }
+
+    #[test]
+    fn workflow_summary_returns_none_for_missing_id() {
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        assert!(journal.workflow_summary("nope").unwrap().is_none());
     }
 
     #[test]

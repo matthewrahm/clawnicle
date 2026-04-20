@@ -1,4 +1,4 @@
 mod schema;
 mod writer;
 
-pub use writer::Journal;
+pub use writer::{Journal, WorkflowSummary};
