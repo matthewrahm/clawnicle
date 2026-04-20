@@ -1,8 +1,8 @@
 use std::fmt::Display;
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use clawnicle_core::{Error, EventPayload, Result};
+use clawnicle_core::{Error, EventPayload, Result, RetryPolicy};
 use clawnicle_journal::Journal;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -68,14 +68,56 @@ impl Context {
         Ok(())
     }
 
-    /// Execute a tool call, journaling start and outcome.
+    /// Execute a tool call once, journaling start and outcome.
     ///
     /// The `step_id` is the idempotency key — the unit used by the replay
     /// engine to detect previously completed work. Pick one that is stable
     /// across restarts and unique per call site (e.g. `"dex_fetch:{mint}"`).
+    ///
+    /// For retry behaviour, use [`Context::call_with_retry`].
     pub async fn call<Out, Fut, F, E>(&mut self, step_id: &str, tool: F) -> Result<Out>
     where
         F: FnOnce() -> Fut,
+        Fut: Future<Output = std::result::Result<Out, E>>,
+        Out: Serialize + DeserializeOwned,
+        E: Display,
+    {
+        let mut slot = Some(tool);
+        self.call_inner(step_id, RetryPolicy::none(), move || {
+            slot.take().expect("FnOnce called twice inside call()")()
+        })
+        .await
+    }
+
+    /// Execute a tool call with the given retry policy.
+    ///
+    /// On transient failure (closure returns Err, or the attempt times out),
+    /// the call is retried up to `policy.max_attempts` times with exponential
+    /// backoff bounded by `policy.max_backoff`. Each attempt appends its own
+    /// ToolCallStarted and ToolCallFailed/Completed events to the journal.
+    pub async fn call_with_retry<Out, Fut, F, E>(
+        &mut self,
+        step_id: &str,
+        policy: RetryPolicy,
+        tool: F,
+    ) -> Result<Out>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::result::Result<Out, E>>,
+        Out: Serialize + DeserializeOwned,
+        E: Display,
+    {
+        self.call_inner(step_id, policy, tool).await
+    }
+
+    async fn call_inner<Out, Fut, F, E>(
+        &mut self,
+        step_id: &str,
+        policy: RetryPolicy,
+        mut tool: F,
+    ) -> Result<Out>
+    where
+        F: FnMut() -> Fut,
         Fut: Future<Output = std::result::Result<Out, E>>,
         Out: Serialize + DeserializeOwned,
         E: Display,
@@ -87,47 +129,70 @@ impl Context {
             return Ok(serde_json::from_value(cached)?);
         }
 
-        self.journal.append(
-            &self.workflow_id,
-            &EventPayload::ToolCallStarted {
-                step_id: step_id.to_string(),
-                name: step_id.to_string(),
-                input_hash: String::new(),
-                attempt: 1,
-            },
-        )?;
+        let mut attempt: u32 = 0;
+        let mut backoff = policy.initial_backoff;
 
-        let start = Instant::now();
-        let result = tool().await;
-        let duration_ms = start.elapsed().as_millis() as u64;
+        loop {
+            attempt += 1;
 
-        match result {
-            Ok(out) => {
-                let out_value = serde_json::to_value(&out)?;
-                self.journal.append(
-                    &self.workflow_id,
-                    &EventPayload::ToolCallCompleted {
-                        step_id: step_id.to_string(),
-                        output: out_value,
-                        duration_ms,
-                    },
-                )?;
-                Ok(out)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                self.journal.append(
-                    &self.workflow_id,
-                    &EventPayload::ToolCallFailed {
-                        step_id: step_id.to_string(),
-                        error: msg.clone(),
-                        duration_ms,
-                    },
-                )?;
-                Err(Error::Tool(msg))
+            self.journal.append(
+                &self.workflow_id,
+                &EventPayload::ToolCallStarted {
+                    step_id: step_id.to_string(),
+                    name: step_id.to_string(),
+                    input_hash: String::new(),
+                    attempt,
+                },
+            )?;
+
+            let start = Instant::now();
+            let fut = tool();
+            let result: std::result::Result<Out, String> = match policy.timeout {
+                Some(t) => match tokio::time::timeout(t, fut).await {
+                    Ok(inner) => inner.map_err(|e| e.to_string()),
+                    Err(_) => Err(format!("timeout after {t:?}")),
+                },
+                None => fut.await.map_err(|e| e.to_string()),
+            };
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(out) => {
+                    let out_value = serde_json::to_value(&out)?;
+                    self.journal.append(
+                        &self.workflow_id,
+                        &EventPayload::ToolCallCompleted {
+                            step_id: step_id.to_string(),
+                            output: out_value,
+                            duration_ms,
+                        },
+                    )?;
+                    return Ok(out);
+                }
+                Err(msg) => {
+                    self.journal.append(
+                        &self.workflow_id,
+                        &EventPayload::ToolCallFailed {
+                            step_id: step_id.to_string(),
+                            error: msg.clone(),
+                            duration_ms,
+                        },
+                    )?;
+
+                    if attempt >= policy.max_attempts {
+                        return Err(Error::Tool(msg));
+                    }
+
+                    tokio::time::sleep(backoff).await;
+                    backoff = Duration::from_secs_f32(
+                        (backoff.as_secs_f32() * policy.backoff_multiplier)
+                            .min(policy.max_backoff.as_secs_f32()),
+                    );
+                }
             }
         }
     }
+
 }
 
 #[cfg(test)]
@@ -244,6 +309,126 @@ mod tests {
             .filter(|e| matches!(e.payload, EventPayload::WorkflowCompleted { .. }))
             .count();
         assert_eq!(completed_count, 1, "exactly one WorkflowCompleted event");
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_succeeds_after_transient_failures() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        use clawnicle_core::RetryPolicy;
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+            timeout: None,
+        };
+
+        let out: u32 = cx
+            .call_with_retry::<u32, _, _, std::io::Error>("flaky-api", policy, || {
+                let attempts = attempts.clone();
+                async move {
+                    let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        Err(std::io::Error::other(format!("transient {n}")))
+                    } else {
+                        Ok(7)
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(out, 7);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "took three attempts");
+
+        // Journal should record 3 ToolCallStarted + 2 ToolCallFailed + 1 ToolCallCompleted.
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let events = journal.read_all("wf").unwrap();
+        let started = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::ToolCallStarted { .. }))
+            .count();
+        let failed = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::ToolCallFailed { .. }))
+            .count();
+        let completed = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::ToolCallCompleted { .. }))
+            .count();
+        assert_eq!((started, failed, completed), (3, 2, 1));
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_gives_up_after_max_attempts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        use clawnicle_core::RetryPolicy;
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+            timeout: None,
+        };
+
+        let res: Result<u32> = cx
+            .call_with_retry::<u32, _, _, std::io::Error>("always-fails", policy, || {
+                let attempts = attempts.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(std::io::Error::other("always"))
+                }
+            })
+            .await;
+
+        assert!(matches!(res, Err(Error::Tool(_))));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "exactly max_attempts");
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_times_out_each_attempt() {
+        use std::time::Duration;
+
+        use clawnicle_core::RetryPolicy;
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(5),
+            backoff_multiplier: 2.0,
+            timeout: Some(Duration::from_millis(20)),
+        };
+
+        let res: Result<u32> = cx
+            .call_with_retry::<u32, _, _, std::io::Error>("slow", policy, || async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(99)
+            })
+            .await;
+
+        assert!(matches!(res, Err(Error::Tool(ref m)) if m.contains("timeout")));
     }
 
     #[tokio::test]
