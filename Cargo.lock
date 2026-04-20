@@ -85,6 +85,7 @@ version = "0.0.1"
 dependencies = [
  "clawnicle-core",
  "clawnicle-journal",
+ "clawnicle-llm",
  "serde",
  "serde_json",
  "tempfile",

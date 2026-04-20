@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 clawnicle-core = { workspace = true }
 clawnicle-journal = { workspace = true }
+clawnicle-llm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

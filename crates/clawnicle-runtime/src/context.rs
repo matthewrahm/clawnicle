@@ -3,7 +3,8 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 use clawnicle_core::{
-    Budget, BudgetUsage, CancelToken, Error, EventPayload, Result, RetryPolicy,
+    Budget, BudgetUsage, CancelToken, Error, EventPayload, LlmRequest, LlmResponse, Result,
+    RetryPolicy,
 };
 use clawnicle_journal::Journal;
 use serde::Serialize;
@@ -168,6 +169,58 @@ impl Context {
         E: Display,
     {
         self.call_inner(step_id, policy, tool).await
+    }
+
+    /// Execute an LLM completion with journal-backed prompt caching.
+    ///
+    /// On first call, the provider is invoked and an `LlmCallCompleted`
+    /// event is written with the request's prompt hash. On any subsequent
+    /// call (same process or after restart) where a cached event with the
+    /// same prompt hash exists for this workflow, the cached response is
+    /// returned without touching the provider.
+    ///
+    /// Tokens from a fresh call are charged against the workflow budget via
+    /// [`Context::charge_tokens`]. Tokens on cache hits are NOT charged —
+    /// budget is a per-session counter; reconstruction from the journal is
+    /// not implemented in v0.
+    pub async fn complete_llm<P>(
+        &mut self,
+        step_id: &str,
+        provider: &P,
+        request: &LlmRequest,
+    ) -> Result<LlmResponse>
+    where
+        P: clawnicle_llm::LlmProvider,
+    {
+        let prompt_hash = request.prompt_hash();
+
+        if let Some(cached) = self
+            .journal
+            .lookup_completed_llm_call(&self.workflow_id, &prompt_hash)?
+        {
+            return Ok(cached);
+        }
+
+        self.check_cancelled()?;
+        self.check_budget()?;
+
+        let response = provider.complete(request).await?;
+
+        self.journal.append(
+            &self.workflow_id,
+            &EventPayload::LlmCallCompleted {
+                step_id: step_id.to_string(),
+                model: response.model.clone(),
+                prompt_hash,
+                response: response.content.clone(),
+                tokens_in: response.tokens_in,
+                tokens_out: response.tokens_out,
+            },
+        )?;
+
+        self.charge_tokens(u64::from(response.tokens_in) + u64::from(response.tokens_out))?;
+
+        Ok(response)
     }
 
     async fn call_inner<Out, Fut, F, E>(
@@ -540,6 +593,86 @@ mod tests {
         assert!(
             matches!(next, Err(Error::BudgetExceeded("wallclock"))),
             "next call must be refused because wallclock cap is already breached"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_llm_caches_response_via_journal() {
+        use clawnicle_core::{LlmMessage, LlmRequest, LlmResponse};
+        use clawnicle_llm::MockProvider;
+
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("j.db");
+
+        let provider = MockProvider::new(vec![LlmResponse {
+            model: "claude-haiku-4-5".into(),
+            content: "hello".into(),
+            tokens_in: 10,
+            tokens_out: 3,
+        }]);
+
+        let req = LlmRequest::new(
+            "claude-haiku-4-5",
+            vec![LlmMessage::user("say hi")],
+        );
+
+        {
+            let journal = Journal::open(&db).unwrap();
+            let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+            let r = cx.complete_llm("greet", &provider, &req).await.unwrap();
+            assert_eq!(r.content, "hello");
+            assert_eq!(cx.usage().tokens, 13);
+        }
+
+        // Reopen the journal. Same request hashes the same; provider must NOT
+        // be hit again even though its queue is empty.
+        let journal = Journal::open(&db).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+        let r = cx.complete_llm("greet", &provider, &req).await.unwrap();
+        assert_eq!(r.content, "hello");
+        assert_eq!(
+            provider.call_count(),
+            1,
+            "provider must be hit exactly once across both runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_llm_charges_tokens_against_budget() {
+        use clawnicle_core::{Budget, LlmMessage, LlmRequest, LlmResponse};
+        use clawnicle_llm::MockProvider;
+
+        let dir = tempdir().unwrap();
+        let provider = MockProvider::new(vec![
+            LlmResponse {
+                model: "m".into(),
+                content: "a".into(),
+                tokens_in: 400,
+                tokens_out: 100,
+            },
+            LlmResponse {
+                model: "m".into(),
+                content: "b".into(),
+                tokens_in: 400,
+                tokens_out: 200,
+            },
+        ]);
+
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h")
+            .unwrap()
+            .with_budget(Budget::unlimited().with_max_tokens(1000));
+
+        let req_a = LlmRequest::new("m", vec![LlmMessage::user("a")]);
+        let req_b = LlmRequest::new("m", vec![LlmMessage::user("b")]);
+
+        cx.complete_llm("s1", &provider, &req_a).await.unwrap();
+        assert_eq!(cx.usage().tokens, 500);
+
+        let second = cx.complete_llm("s2", &provider, &req_b).await;
+        assert!(
+            matches!(second, Err(Error::BudgetExceeded("tokens"))),
+            "tokens=500+600 breaches cap=1000"
         );
     }
 
