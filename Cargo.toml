@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/clawnicle-core",
     "crates/clawnicle-journal",
+    "crates/clawnicle-cli",
     "crates/clawnicle-llm",
     "crates/clawnicle-runtime",
     "examples/hello",
