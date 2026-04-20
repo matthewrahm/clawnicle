@@ -50,6 +50,13 @@ impl Context {
         Out: Serialize + DeserializeOwned,
         E: Display,
     {
+        if let Some(cached) = self
+            .journal
+            .lookup_completed_tool_call(&self.workflow_id, step_id)?
+        {
+            return Ok(serde_json::from_value(cached)?);
+        }
+
         self.journal.append(
             &self.workflow_id,
             &EventPayload::ToolCallStarted {
@@ -123,6 +130,51 @@ mod tests {
             events[2].payload,
             EventPayload::ToolCallCompleted { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn call_short_circuits_on_replay() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("j.db");
+        let calls = Arc::new(AtomicU32::new(0));
+
+        {
+            let journal = Journal::open(&db_path).unwrap();
+            let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+            let calls = calls.clone();
+            let out: u32 = cx
+                .call::<u32, _, _, std::io::Error>("expensive", || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(42)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(out, 42);
+        }
+
+        // Reopen the journal (simulating a restart) and call again with the
+        // same step_id — the closure must NOT run again.
+        let journal = Journal::open(&db_path).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+        let out: u32 = cx
+            .call::<u32, _, _, std::io::Error>("expensive", || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(99) // different value; replay must return the cached 42
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(out, 42, "replay must return cached output, not re-execute");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "closure ran exactly once");
     }
 
     #[tokio::test]
