@@ -7,8 +7,16 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+anthropic = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
 [dependencies]
 clawnicle-core = { workspace = true }
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tokio = { workspace = true }
