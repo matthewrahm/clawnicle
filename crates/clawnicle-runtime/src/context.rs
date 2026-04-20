@@ -99,6 +99,17 @@ impl Context {
         Ok(())
     }
 
+    /// Returns true if the given step already has a completed tool call in
+    /// the journal. A subsequent `call()` with this step_id will short-circuit
+    /// from cache. Exposed for demos and observability; replay itself does
+    /// not need the caller to check this.
+    pub fn has_cached_tool_call(&self, step_id: &str) -> Result<bool> {
+        Ok(self
+            .journal
+            .lookup_completed_tool_call(&self.workflow_id, step_id)?
+            .is_some())
+    }
+
     /// Returns the cached final output if the workflow has already completed.
     ///
     /// Used at the top of a workflow function to short-circuit replay when
