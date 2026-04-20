@@ -2,7 +2,9 @@ use std::fmt::Display;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use clawnicle_core::{Budget, BudgetUsage, Error, EventPayload, Result, RetryPolicy};
+use clawnicle_core::{
+    Budget, BudgetUsage, CancelToken, Error, EventPayload, Result, RetryPolicy,
+};
 use clawnicle_journal::Journal;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -12,6 +14,7 @@ pub struct Context {
     journal: Journal,
     budget: Budget,
     usage: BudgetUsage,
+    cancel: Option<CancelToken>,
 }
 
 impl Context {
@@ -35,6 +38,7 @@ impl Context {
             journal,
             budget: Budget::unlimited(),
             usage: BudgetUsage::zero(),
+            cancel: None,
         })
     }
 
@@ -47,6 +51,22 @@ impl Context {
     pub fn with_budget(mut self, budget: Budget) -> Self {
         self.budget = budget;
         self
+    }
+
+    /// Attach a [`CancelToken`] so external callers can interrupt the
+    /// workflow between tool-call attempts.
+    pub fn with_cancel_token(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        if let Some(token) = &self.cancel {
+            if token.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+        Ok(())
     }
 
     pub fn budget(&self) -> &Budget {
@@ -169,6 +189,7 @@ impl Context {
             return Ok(serde_json::from_value(cached)?);
         }
 
+        self.check_cancelled()?;
         self.check_budget()?;
 
         let mut attempt: u32 = 0;
@@ -227,6 +248,7 @@ impl Context {
                         return Err(Error::Tool(msg));
                     }
 
+                    self.check_cancelled()?;
                     self.check_budget()?;
 
                     tokio::time::sleep(backoff).await;
@@ -518,6 +540,72 @@ mod tests {
         assert!(
             matches!(next, Err(Error::BudgetExceeded("wallclock"))),
             "next call must be refused because wallclock cap is already breached"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_before_first_call_returns_cancelled() {
+        use clawnicle_core::CancelToken;
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let token = CancelToken::new();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h")
+            .unwrap()
+            .with_cancel_token(token.clone());
+
+        token.cancel();
+
+        let res: Result<u32> = cx
+            .call::<u32, _, _, std::io::Error>("never", || async { Ok(1) })
+            .await;
+        assert!(matches!(res, Err(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn cancel_between_retry_attempts_stops_retrying() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        use clawnicle_core::{CancelToken, RetryPolicy};
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let token = CancelToken::new();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h")
+            .unwrap()
+            .with_cancel_token(token.clone());
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let token_for_closure = token.clone();
+        let policy = RetryPolicy {
+            max_attempts: 10,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(5),
+            backoff_multiplier: 2.0,
+            timeout: None,
+        };
+
+        let res: Result<u32> = cx
+            .call_with_retry::<u32, _, _, std::io::Error>("flaky", policy, || {
+                let attempts = attempts.clone();
+                let token = token_for_closure.clone();
+                async move {
+                    let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n == 2 {
+                        token.cancel();
+                    }
+                    Err(std::io::Error::other("nope"))
+                }
+            })
+            .await;
+
+        assert!(matches!(res, Err(Error::Cancelled)));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "attempts stopped after cancel was flipped during attempt 2"
         );
     }
 
