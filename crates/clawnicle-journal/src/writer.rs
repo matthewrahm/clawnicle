@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clawnicle_core::{Error, Event, EventPayload, Result};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::schema::SCHEMA_SQL;
 
@@ -77,6 +77,51 @@ impl Journal {
 
         tx.commit().map_err(journal_err)?;
         Ok(seq)
+    }
+
+    pub fn workflow_status(&self, workflow_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT status FROM workflows WHERE id = ?1",
+                params![workflow_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(journal_err)
+    }
+
+    pub fn lookup_completed_tool_call(
+        &self,
+        workflow_id: &str,
+        step_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                r#"SELECT payload
+                   FROM events
+                   WHERE workflow_id = ?1
+                     AND kind = 'tool_call_completed'
+                     AND json_extract(payload, '$.step_id') = ?2
+                   ORDER BY sequence ASC
+                   LIMIT 1"#,
+                params![workflow_id, step_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(journal_err)?;
+
+        match row {
+            Some(payload_json) => {
+                let payload: EventPayload = serde_json::from_str(&payload_json)?;
+                if let EventPayload::ToolCallCompleted { output, .. } = payload {
+                    Ok(Some(output))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn read_all(&self, workflow_id: &str) -> Result<Vec<Event>> {
@@ -220,6 +265,95 @@ mod tests {
         assert_eq!(a[1].sequence, 2);
         assert_eq!(b[0].sequence, 1);
         assert_eq!(b[1].sequence, 2);
+    }
+
+    #[test]
+    fn workflow_status_reflects_terminal_events() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+
+        assert_eq!(journal.workflow_status("missing").unwrap(), None);
+
+        journal.start_workflow("wf", "test", "h", None).unwrap();
+        assert_eq!(
+            journal.workflow_status("wf").unwrap().as_deref(),
+            Some("running")
+        );
+
+        journal
+            .append(
+                "wf",
+                &EventPayload::WorkflowCompleted {
+                    output: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            journal.workflow_status("wf").unwrap().as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn lookup_completed_tool_call_returns_cached_output() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+        journal.start_workflow("wf", "t", "h", None).unwrap();
+
+        assert_eq!(
+            journal.lookup_completed_tool_call("wf", "fetch-1").unwrap(),
+            None
+        );
+
+        journal
+            .append(
+                "wf",
+                &EventPayload::ToolCallCompleted {
+                    step_id: "fetch-1".into(),
+                    output: serde_json::json!({ "price": 42 }),
+                    duration_ms: 11,
+                },
+            )
+            .unwrap();
+
+        let cached = journal.lookup_completed_tool_call("wf", "fetch-1").unwrap();
+        assert_eq!(cached, Some(serde_json::json!({ "price": 42 })));
+
+        assert_eq!(
+            journal.lookup_completed_tool_call("wf", "fetch-2").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn lookup_scoped_to_workflow() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+        journal.start_workflow("a", "t", "h", None).unwrap();
+        journal.start_workflow("b", "t", "h", None).unwrap();
+        journal
+            .append(
+                "a",
+                &EventPayload::ToolCallCompleted {
+                    step_id: "shared-key".into(),
+                    output: serde_json::json!("from-a"),
+                    duration_ms: 1,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            journal
+                .lookup_completed_tool_call("a", "shared-key")
+                .unwrap(),
+            Some(serde_json::json!("from-a"))
+        );
+        assert_eq!(
+            journal
+                .lookup_completed_tool_call("b", "shared-key")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
