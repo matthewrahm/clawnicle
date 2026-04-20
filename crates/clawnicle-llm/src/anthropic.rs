@@ -111,14 +111,18 @@ pub(crate) fn build_request_body(request: &LlmRequest) -> AnthropicRequest {
         model: request.model.clone(),
         max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         messages,
-        system: if system.is_empty() { None } else { Some(system) },
+        system: if system.is_empty() {
+            None
+        } else {
+            Some(system)
+        },
         temperature: request.temperature,
     }
 }
 
 pub(crate) fn parse_response(bytes: &[u8]) -> Result<LlmResponse> {
-    let raw: AnthropicResponse = serde_json::from_slice(bytes)
-        .map_err(|e| Error::Tool(format!("anthropic parse: {e}")))?;
+    let raw: AnthropicResponse =
+        serde_json::from_slice(bytes).map_err(|e| Error::Tool(format!("anthropic parse: {e}")))?;
 
     let content = raw
         .content

@@ -83,7 +83,10 @@ fn bench_complete_llm_cached(c: &mut Criterion) {
     c.bench_function("complete_llm_cached_short_circuit", |b| {
         b.iter(|| {
             let r = rt
-                .block_on(async { cx.complete_llm(black_box("s"), &provider, black_box(&req)).await })
+                .block_on(async {
+                    cx.complete_llm(black_box("s"), &provider, black_box(&req))
+                        .await
+                })
                 .unwrap();
             black_box(r);
         });

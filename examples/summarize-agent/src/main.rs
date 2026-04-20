@@ -56,10 +56,7 @@ async fn main() -> Result<()> {
 
     let request = LlmRequest {
         model: MODEL.into(),
-        messages: vec![
-            LlmMessage::system(SYSTEM_PROMPT),
-            LlmMessage::user(input),
-        ],
+        messages: vec![LlmMessage::system(SYSTEM_PROMPT), LlmMessage::user(input)],
         temperature: Some(0.2),
         max_tokens: Some(256),
     };

@@ -93,10 +93,7 @@ mod tests {
 
     #[test]
     fn prompt_hash_is_stable_across_calls() {
-        let req = LlmRequest::new(
-            "claude-haiku-4-5",
-            vec![LlmMessage::user("hi")],
-        );
+        let req = LlmRequest::new("claude-haiku-4-5", vec![LlmMessage::user("hi")]);
         assert_eq!(req.prompt_hash(), req.prompt_hash());
     }
 

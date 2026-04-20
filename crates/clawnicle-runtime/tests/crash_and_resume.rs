@@ -81,8 +81,16 @@ async fn crash_mid_workflow_resumes_from_last_successful_step() {
     };
 
     assert_eq!(final_sum, 7);
-    assert_eq!(a.load(Ordering::SeqCst), 1, "step-a did NOT re-execute on resume");
-    assert_eq!(b.load(Ordering::SeqCst), 2, "step-b re-executed after crash");
+    assert_eq!(
+        a.load(Ordering::SeqCst),
+        1,
+        "step-a did NOT re-execute on resume"
+    );
+    assert_eq!(
+        b.load(Ordering::SeqCst),
+        2,
+        "step-b re-executed after crash"
+    );
     assert_eq!(c.load(Ordering::SeqCst), 1, "step-c ran once after resume");
 
     // Run 3 — workflow already completed; cached final output returns immediately.

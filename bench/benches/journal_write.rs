@@ -24,7 +24,9 @@ fn bench_append_small(c: &mut Criterion) {
                 output: serde_json::json!({ "n": counter }),
                 duration_ms: 1,
             };
-            journal.append(black_box("wf"), black_box(&payload)).unwrap();
+            journal
+                .append(black_box("wf"), black_box(&payload))
+                .unwrap();
         });
     });
 }
@@ -45,7 +47,9 @@ fn bench_append_medium(c: &mut Criterion) {
                 output: serde_json::json!({ "blob": &blob }),
                 duration_ms: 1,
             };
-            journal.append(black_box("wf"), black_box(&payload)).unwrap();
+            journal
+                .append(black_box("wf"), black_box(&payload))
+                .unwrap();
         });
     });
 }
@@ -78,5 +82,10 @@ fn bench_lookup_hit(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_append_small, bench_append_medium, bench_lookup_hit);
+criterion_group!(
+    benches,
+    bench_append_small,
+    bench_append_medium,
+    bench_lookup_hit
+);
 criterion_main!(benches);

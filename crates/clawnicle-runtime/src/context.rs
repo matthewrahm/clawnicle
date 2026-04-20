@@ -324,7 +324,6 @@ impl Context {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -361,8 +360,8 @@ mod tests {
 
     #[tokio::test]
     async fn call_short_circuits_on_replay() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("j.db");
@@ -622,10 +621,7 @@ mod tests {
             tokens_out: 3,
         }]);
 
-        let req = LlmRequest::new(
-            "claude-haiku-4-5",
-            vec![LlmMessage::user("say hi")],
-        );
+        let req = LlmRequest::new("claude-haiku-4-5", vec![LlmMessage::user("say hi")]);
 
         {
             let journal = Journal::open(&db).unwrap();

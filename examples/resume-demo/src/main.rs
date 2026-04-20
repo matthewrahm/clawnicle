@@ -66,25 +66,43 @@ fn print_header() {
 async fn run(cx: &mut Context, heal: bool) -> Result<u32> {
     let mut skipped = 0;
 
-    skipped += do_step(cx, "1/4", "Searching for articles", "search-articles", || async {
-        tokio::time::sleep(Duration::from_millis(450)).await;
-        Ok::<_, io::Error>("found 3 articles".to_string())
-    })
+    skipped += do_step(
+        cx,
+        "1/4",
+        "Searching for articles",
+        "search-articles",
+        || async {
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            Ok::<_, io::Error>("found 3 articles".to_string())
+        },
+    )
     .await?;
 
-    skipped += do_step(cx, "2/4", "Extracting key points", "extract-points", || async {
-        tokio::time::sleep(Duration::from_millis(450)).await;
-        Ok::<_, io::Error>("extracted 5 points".to_string())
-    })
+    skipped += do_step(
+        cx,
+        "2/4",
+        "Extracting key points",
+        "extract-points",
+        || async {
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            Ok::<_, io::Error>("extracted 5 points".to_string())
+        },
+    )
     .await?;
 
-    skipped += do_step(cx, "3/4", "Writing summary", "write-summary", move || async move {
-        tokio::time::sleep(Duration::from_millis(450)).await;
-        if !heal {
-            return Err(io::Error::other("writer service returned 503"));
-        }
-        Ok("wrote 220-word summary".to_string())
-    })
+    skipped += do_step(
+        cx,
+        "3/4",
+        "Writing summary",
+        "write-summary",
+        move || async move {
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            if !heal {
+                return Err(io::Error::other("writer service returned 503"));
+            }
+            Ok("wrote 220-word summary".to_string())
+        },
+    )
     .await?;
 
     skipped += do_step(cx, "4/4", "Reviewing summary", "review-summary", || async {
