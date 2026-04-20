@@ -1,0 +1,15 @@
+[package]
+name = "resume-demo"
+description = "Crash-and-resume demo: partial workflow crashes, second run resumes from last step"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+clawnicle-core = { workspace = true }
+clawnicle-journal = { workspace = true }
+clawnicle-runtime = { workspace = true }
+tokio = { workspace = true }
