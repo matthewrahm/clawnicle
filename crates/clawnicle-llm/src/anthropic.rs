@@ -12,7 +12,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use clawnicle_core::{Error, LlmMessage, LlmRequest, LlmResponse, LlmRole, Result};
+use clawnicle_core::{Error, LlmRequest, LlmResponse, LlmRole, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::LlmProvider;

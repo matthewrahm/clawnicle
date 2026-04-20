@@ -1,0 +1,21 @@
+[package]
+name = "summarize-agent"
+description = "Durable LLM-summary agent — reads text from stdin, produces bullet summary, journals every call"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[features]
+default = []
+anthropic = ["clawnicle-llm/anthropic"]
+
+[dependencies]
+clawnicle-core = { workspace = true }
+clawnicle-journal = { workspace = true }
+clawnicle-llm = { workspace = true }
+clawnicle-runtime = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }

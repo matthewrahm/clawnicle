@@ -8,6 +8,7 @@ members = [
     "crates/clawnicle-runtime",
     "examples/hello",
     "examples/resume-demo",
+    "examples/summarize-agent",
 ]
 
 [workspace.package]
