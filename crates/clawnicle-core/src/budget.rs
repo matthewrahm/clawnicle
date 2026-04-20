@@ -58,20 +58,20 @@ impl BudgetUsage {
     /// Returns the first field name (tokens/usd/wallclock) that would exceed
     /// the given budget, or None if the usage fits.
     pub fn exceeds(&self, budget: &Budget) -> Option<&'static str> {
-        if let Some(cap) = budget.max_tokens {
-            if self.tokens > cap {
-                return Some("tokens");
-            }
+        if let Some(cap) = budget.max_tokens
+            && self.tokens > cap
+        {
+            return Some("tokens");
         }
-        if let Some(cap) = budget.max_usd_micros {
-            if self.usd_micros > cap {
-                return Some("usd");
-            }
+        if let Some(cap) = budget.max_usd_micros
+            && self.usd_micros > cap
+        {
+            return Some("usd");
         }
-        if let Some(cap) = budget.max_wallclock_ms {
-            if self.wallclock_ms > cap {
-                return Some("wallclock");
-            }
+        if let Some(cap) = budget.max_wallclock_ms
+            && self.wallclock_ms > cap
+        {
+            return Some("wallclock");
         }
         None
     }

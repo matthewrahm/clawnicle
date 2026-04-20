@@ -56,8 +56,8 @@ fn list(journal: &Journal) -> Result<()> {
     }
 
     println!(
-        "{:<28} {:<14} {:<10} {:>8}  {}",
-        "id", "name", "status", "events", "updated"
+        "{:<28} {:<14} {:<10} {:>8}  updated",
+        "id", "name", "status", "events"
     );
     println!("{}", "-".repeat(80));
     for w in workflows {

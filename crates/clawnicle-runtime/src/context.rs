@@ -62,10 +62,10 @@ impl Context {
     }
 
     fn check_cancelled(&self) -> Result<()> {
-        if let Some(token) = &self.cancel {
-            if token.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
+        if let Some(token) = &self.cancel
+            && token.is_cancelled()
+        {
+            return Err(Error::Cancelled);
         }
         Ok(())
     }

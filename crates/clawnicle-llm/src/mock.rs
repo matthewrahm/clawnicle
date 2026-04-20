@@ -30,6 +30,7 @@ impl MockProvider {
 }
 
 impl LlmProvider for MockProvider {
+    #[allow(clippy::manual_async_fn)]
     fn complete<'a>(
         &'a self,
         _request: &'a LlmRequest,

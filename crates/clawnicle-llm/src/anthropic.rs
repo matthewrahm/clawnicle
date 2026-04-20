@@ -49,6 +49,9 @@ impl AnthropicProvider {
 }
 
 impl LlmProvider for AnthropicProvider {
+    // `async fn` in trait impl would drop the explicit `+ Send` bound that
+    // the trait signature requires; keep the manual form.
+    #[allow(clippy::manual_async_fn)]
     fn complete<'a>(
         &'a self,
         request: &'a LlmRequest,
@@ -127,9 +130,8 @@ pub(crate) fn parse_response(bytes: &[u8]) -> Result<LlmResponse> {
     let content = raw
         .content
         .into_iter()
-        .find_map(|b| match b {
-            AnthropicContentBlock::Text { text } => Some(text),
-        })
+        .next()
+        .map(|AnthropicContentBlock::Text { text }| text)
         .unwrap_or_default();
 
     Ok(LlmResponse {
