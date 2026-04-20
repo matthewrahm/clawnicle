@@ -4,7 +4,19 @@ Durable agent runtime for Rust. Write LLM agent workflows as ordinary async func
 
 > Temporal's durable-execution model, redesigned for LLM agents.
 
-**Status:** v0 in progress. Weeks 1–4 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, `call_with_retry` (exponential backoff + per-attempt timeout), per-workflow budgets (tokens / USD / wallclock) with cooperative cancellation via `CancelToken`, `complete_llm` with journal-backed prompt caching and `LlmProvider` trait, `clawnicle` CLI for inspecting journals, and a runnable crash-and-resume demo.
+**Status:** v0 in progress. Weeks 1–5 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, `call_with_retry` (exponential backoff + per-attempt timeout), per-workflow budgets (tokens / USD / wallclock) with cooperative cancellation via `CancelToken`, `complete_llm` with journal-backed prompt caching, `LlmProvider` trait with `MockProvider` + `AnthropicProvider` (Messages API), `clawnicle` CLI, criterion benchmarks, and two runnable demos — `resume-demo` (crash-and-resume) and `summarize-agent` (LLM summary with caching).
+
+## Measured performance (Mac Mini, release profile)
+
+| Scenario | Time |
+|---|---|
+| `Journal::append` (small payload) | ~21 µs |
+| `Journal::append` (2 KB payload) | ~34 µs |
+| `Context::call` fresh | ~1.4 ms |
+| `Context::call` cached (replay short-circuit) | ~3.7 µs |
+| `Context::complete_llm` cached | ~4.5 µs |
+
+See [`docs/benchmarks.md`](docs/benchmarks.md) for reproduction steps and caveats.
 
 ## Why
 
@@ -42,8 +54,11 @@ crates/
 examples/
   hello                → minimal two-event workflow trace
   resume-demo          → three-step workflow that crashes and resumes
+  summarize-agent      → durable LLM bullet-summary agent
+bench/                 → criterion benchmarks
 docs/
   architecture.md      → event model, replay semantics, determinism contract
+  benchmarks.md        → measured numbers + reproduction steps
 ```
 
 ## Quickstart
@@ -61,10 +76,20 @@ cargo run -p resume-demo
 CLAWNICLE_HEAL=1 cargo run -p resume-demo
 cargo run -p resume-demo  # already-complete path
 
-# Inspect the resulting journal
+# Durable LLM summary (MockProvider — zero config, always runs)
+echo "any text you'd like summarized" | cargo run -p summarize-agent
+
+# Same, but hit real Anthropic if you have a key
+ANTHROPIC_API_KEY=sk-ant-... echo "text" | \
+  cargo run -p summarize-agent --features anthropic
+
+# Inspect any workflow's journal
 cargo run -p clawnicle-cli -- --db resume-demo.clawnicle.db list
 cargo run -p clawnicle-cli -- --db resume-demo.clawnicle.db show   demo-1
 cargo run -p clawnicle-cli -- --db resume-demo.clawnicle.db events demo-1
+
+# Benchmarks
+cargo bench -p clawnicle-bench
 ```
 
 Read [`docs/architecture.md`](docs/architecture.md) for the event model, replay semantics, determinism contract, retry/budget/cancel semantics, and LLM prompt-cache model.
