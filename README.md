@@ -6,7 +6,7 @@
 
 ![crash-and-resume demo](docs/resume-demo.gif)
 
-*Three runs of the bundled demo: the first crashes at step-b, the second resumes — step-a short-circuits from the journal, step-b retries, step-c runs fresh — and `clawnicle events` shows the full trace including the failed attempt.*
+*Three runs of the bundled demo: the first crashes at step-b; the second resumes (step-a short-circuits from the journal, step-b retries, step-c runs fresh); and `clawnicle events` shows the full trace including the failed attempt.*
 
 ---
 
