@@ -182,6 +182,78 @@ impl Context {
         self.call_inner(step_id, policy, tool).await
     }
 
+    /// Spawn a child workflow inline and await its result.
+    ///
+    /// The child gets its own workflow row with `parent_id = self.workflow_id`,
+    /// its own sequence of journal events, and its own replay semantics.
+    /// Idempotent on replay: if the child has already completed in a prior
+    /// run of the parent, the cached final output is returned without
+    /// re-executing the handler.
+    ///
+    /// The child runs in the current task (not the scheduler's task pool),
+    /// which is fine for sequential composition. For true fan-out across
+    /// multiple children, call `spawn_child` concurrently from a parent that
+    /// has access to tokio primitives (`tokio::join!`, `JoinSet`).
+    pub async fn spawn_child<F, Fut>(
+        &mut self,
+        child_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        handler: F,
+    ) -> Result<serde_json::Value>
+    where
+        F: FnOnce(Context, serde_json::Value) -> Fut,
+        Fut: Future<Output = Result<serde_json::Value>>,
+    {
+        // Replay short-circuit: if the child already completed, skip.
+        let parent_path = self.journal.path().to_path_buf();
+        let probe = Journal::open(&parent_path)?;
+        if probe.workflow_status(child_id)?.as_deref() == Some("completed") {
+            for event in probe.read_all(child_id)? {
+                if let EventPayload::WorkflowCompleted { output } = event.payload {
+                    return Ok(output);
+                }
+            }
+            return Ok(serde_json::Value::Null);
+        }
+        drop(probe);
+
+        // Create or resume the child workflow row.
+        {
+            let mut journal = Journal::open(&parent_path)?;
+            journal.start_child_workflow(&self.workflow_id, child_id, name, input)?;
+        }
+
+        // Open a fresh Context on the child and hand it to the handler.
+        let child_journal = Journal::open(&parent_path)?;
+        let mut child_cx = Context::open_or_start(child_journal, child_id, name, "")?;
+
+        match handler(
+            Context::open_or_start(Journal::open(&parent_path)?, child_id, name, "")?,
+            input.clone(),
+        )
+        .await
+        {
+            Ok(output) => {
+                // Ensure the child is marked complete. If the handler already
+                // called cx.complete() the status is already 'completed' and
+                // Context::complete is a no-op; otherwise we emit it here.
+                child_cx.complete(&output)?;
+                Ok(output)
+            }
+            Err(err) => {
+                let mut journal = Journal::open(&parent_path)?;
+                journal.append(
+                    child_id,
+                    &EventPayload::WorkflowFailed {
+                        error: err.to_string(),
+                    },
+                )?;
+                Err(err)
+            }
+        }
+    }
+
     /// Execute an LLM completion with journal-backed prompt caching.
     ///
     /// On first call, the provider is invoked and an `LlmCallCompleted`
@@ -680,6 +752,100 @@ mod tests {
         assert!(
             matches!(second, Err(Error::BudgetExceeded("tokens"))),
             "tokens=500+600 breaches cap=1000"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_child_runs_and_returns_output() {
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut parent = Context::open_or_start(journal, "parent-1", "parent", "").unwrap();
+
+        let result = parent
+            .spawn_child(
+                "child-1",
+                "greet",
+                &serde_json::json!({ "who": "world" }),
+                |mut child_cx, input| async move {
+                    let who = input["who"].as_str().unwrap().to_string();
+                    let greeting = format!("hello, {who}");
+                    child_cx.complete(&greeting)?;
+                    Ok(serde_json::json!(greeting))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!("hello, world"));
+
+        // Child row has parent_id set and status='completed'.
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        assert_eq!(
+            journal.workflow_status("child-1").unwrap().as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_child_short_circuits_on_parent_replay() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("j.db");
+        let child_invocations = Arc::new(AtomicU32::new(0));
+
+        // First parent run completes the child.
+        {
+            let journal = Journal::open(&db).unwrap();
+            let mut parent = Context::open_or_start(journal, "parent-2", "parent", "").unwrap();
+            let counter = child_invocations.clone();
+            let out = parent
+                .spawn_child(
+                    "child-2",
+                    "count",
+                    &serde_json::Value::Null,
+                    move |mut cx, _| {
+                        let counter = counter.clone();
+                        async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            cx.complete(&42)?;
+                            Ok(serde_json::json!(42))
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(out, serde_json::json!(42));
+        }
+
+        // Second parent run (simulating a restart) — spawn_child for the same
+        // child_id must return the cached output without running the handler.
+        {
+            let journal = Journal::open(&db).unwrap();
+            let mut parent = Context::open_or_start(journal, "parent-2", "parent", "").unwrap();
+            let counter = child_invocations.clone();
+            let out = parent
+                .spawn_child(
+                    "child-2",
+                    "count",
+                    &serde_json::Value::Null,
+                    move |_cx, _| {
+                        let counter = counter.clone();
+                        async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            Ok(serde_json::json!(999))
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(out, serde_json::json!(42));
+        }
+
+        assert_eq!(
+            child_invocations.load(Ordering::SeqCst),
+            1,
+            "child handler ran exactly once across both parent runs"
         );
     }
 

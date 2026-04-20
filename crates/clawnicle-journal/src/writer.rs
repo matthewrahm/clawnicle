@@ -30,13 +30,24 @@ pub struct ClaimedWorkflow {
 
 pub struct Journal {
     conn: Connection,
+    path: std::path::PathBuf,
 }
 
 impl Journal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path).map_err(journal_err)?;
+        let path_buf = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path_buf).map_err(journal_err)?;
         conn.execute_batch(SCHEMA_SQL).map_err(journal_err)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            path: path_buf,
+        })
+    }
+
+    /// Filesystem path this journal was opened from. Used by the runtime to
+    /// open a fresh handle for child workflows.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn start_workflow(
@@ -180,6 +191,42 @@ impl Journal {
                 params![workflow_id, name, input_hash, input_json, now],
             )
             .map_err(journal_err)?;
+        Ok(())
+    }
+
+    /// Insert a child workflow row with `parent_id` set and immediately mark
+    /// it `running`, emitting the `WorkflowStarted` event in the same
+    /// transaction. If a row with this id already exists, this is a no-op —
+    /// the caller can then proceed to run the child and its tool calls will
+    /// short-circuit via the normal replay path.
+    pub fn start_child_workflow(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Result<()> {
+        if self.workflow_status(child_id)?.is_some() {
+            return Ok(());
+        }
+        let now = now_ms();
+        let input_json = serde_json::to_string(input)?;
+        let input_hash = hash_input(&input_json);
+
+        let tx = self.conn.transaction().map_err(journal_err)?;
+        tx.execute(
+            r#"INSERT INTO workflows
+                 (id, name, status, input_hash, input_json, parent_id, created_at, updated_at)
+               VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6, ?6)"#,
+            params![child_id, name, input_hash, input_json, parent_id, now],
+        )
+        .map_err(journal_err)?;
+        let payload = EventPayload::WorkflowStarted {
+            name: name.to_string(),
+            input_hash,
+        };
+        append_in_tx(&tx, child_id, &payload, now)?;
+        tx.commit().map_err(journal_err)?;
         Ok(())
     }
 
