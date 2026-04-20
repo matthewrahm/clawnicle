@@ -5,48 +5,52 @@
 
 Output docs/resume-demo.gif
 
-Set Shell   "zsh"
-Set FontSize 14
-Set Width   1100
-Set Height   720
-Set Theme   "Dracula"
-Set TypingSpeed 40ms
-Set Padding 20
+Set Shell      "zsh"
+Set Theme      "TokyoNight"
+Set FontSize   16
+Set Width      1200
+Set Height     720
+Set TypingSpeed 35ms
+Set Padding    24
 
 # ---- silent setup --------------------------------------------------
 Hide
-Type "cd /tmp"                                               Enter
-Type "rm -f resume-demo.clawnicle.db*"                       Enter
-Type "alias demo=$HOME/Documents/CODE/clawnicle/target/release/resume-demo"  Enter
-Type "alias cl=$HOME/Documents/CODE/clawnicle/target/release/clawnicle"      Enter
-Type "clear"                                                 Enter
+Type "cd /tmp && rm -f resume-demo.clawnicle.db*"
+Enter
+Type "alias demo=$HOME/Documents/CODE/clawnicle/target/release/resume-demo"
+Enter
+Type "alias cl=$HOME/Documents/CODE/clawnicle/target/release/clawnicle"
+Enter
+Type "clear"
+Enter
 Show
+Sleep 500ms
 
 # ---- Act 1 — crash --------------------------------------------------
-Type "# step-b fails on first run — workflow crashes"
+Type "# run 1 — step-b fails mid-workflow"
 Enter
-Sleep 800ms
+Sleep 900ms
 Type "demo"
 Enter
-Sleep 3s
+Sleep 3.2s
 
-# ---- Act 2 — resume from last successful step ----------------------
-Type "# heal and rerun — step-a is cached, step-b retries, step-c runs"
+# ---- Act 2 — resume from cached step-a -----------------------------
+Type "# heal and rerun — step-a is cached from the journal"
 Enter
-Sleep 800ms
+Sleep 900ms
 Type "CLAWNICLE_HEAL=1 demo"
 Enter
-Sleep 3s
+Sleep 3.2s
 
 # ---- Act 3 — inspect the journal -----------------------------------
-Type "# inspect the journal — step-b appears twice (failed, then retried)"
+Type "# inspect the workflow — journal survived the crash"
 Enter
-Sleep 800ms
-Type "cl --db resume-demo.clawnicle.db events demo-1"
+Sleep 900ms
+Type "cl --db resume-demo.clawnicle.db show demo-1"
 Enter
-Sleep 5s
+Sleep 4.5s
 
-# ---- silent teardown ------------------------------------------------
+# ---- silent teardown -----------------------------------------------
 Hide
 Type "rm -f resume-demo.clawnicle.db*"
 Enter
