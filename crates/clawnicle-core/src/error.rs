@@ -10,6 +10,12 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("tool failed: {0}")]
+    Tool(String),
+
+    #[error("workflow not found: {0}")]
+    WorkflowNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
