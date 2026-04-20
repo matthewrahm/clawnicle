@@ -4,7 +4,7 @@ Durable agent runtime for Rust. Write LLM agent workflows as ordinary async func
 
 > Temporal's durable-execution model, redesigned for LLM agents.
 
-**Status:** v0 in progress. Weeks 1–2 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, and a runnable crash-and-resume demo.
+**Status:** v0 in progress. Weeks 1–3 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, `call_with_retry` (exponential backoff + per-attempt timeout), per-workflow budgets (tokens / USD / wallclock) with cooperative cancellation via `CancelToken`, and a runnable crash-and-resume demo.
 
 ## Why
 

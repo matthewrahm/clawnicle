@@ -74,9 +74,43 @@ events    (id, workflow_id, sequence, kind, payload, created_at)
 
 Storage is abstracted behind `clawnicle_journal::Journal`. Swapping to Postgres or FoundationDB is a v1 change; nothing above the journal crate knows about SQLite.
 
+## Retries
+
+`Context::call_with_retry(step_id, policy, closure)` runs the closure up to `policy.max_attempts` times, with exponential backoff bounded by `policy.max_backoff` between attempts. Each attempt appends its own `ToolCallStarted` event (with an incrementing `attempt` field), and its own `ToolCallFailed` event on error. When an attempt succeeds, a single `ToolCallCompleted` event terminates the sequence — the journal preserves the full retry history for observability.
+
+Per-attempt timeout is implemented with `tokio::time::timeout`. A timeout is indistinguishable from any other failure from the journal's perspective: `ToolCallFailed { error: "timeout after ...", ... }`.
+
+Replay short-circuits at the first `ToolCallCompleted` for the step — even if it was reached after 4 failed attempts in the original run.
+
+## Budgets
+
+`Context::with_budget(Budget)` attaches caps on tokens, USD (tracked in micros, `1 USD == 1_000_000`), and wallclock milliseconds. `BudgetUsage` is a per-session counter updated by:
+
+- `Context::charge_tokens(n)` — called by the LLM provider (Week 4) after each completion with `tokens_in + tokens_out`.
+- `Context::charge_usd_micros(n)` — same, converted via model price table.
+- wallclock — updated automatically after every tool-call attempt.
+
+Enforcement points:
+
+1. **Before a new call_inner.** If usage already exceeds any cap, the call fails with `Error::BudgetExceeded(field_name)` before journaling anything.
+2. **Between a failed attempt and its retry.** Avoids burning budget retrying when already over.
+
+Deliberately NOT enforced at call-success time: a call that completes gets its output; the next call catches the breach. A call whose own duration crosses the cap is not treated as failed.
+
+Budget state is per-session — a process restart resets wallclock to zero. Tokens and USD could be reconstructed from journaled `LlmCallCompleted` events on resume; wallclock is inherently process-local. (Reconstruction is not implemented in v0.)
+
+## Cancellation
+
+`CancelToken` is a cloneable `Arc<AtomicBool>`. Any clone can flip the flag. Attach one via `Context::with_cancel_token`; the runtime polls the flag at the same suspension points as budget enforcement:
+
+- Before a new `call_inner`.
+- Between a failed attempt and its retry sleep.
+
+Cancellation is cooperative — user closures in flight are not interrupted. For hard interruption of a stuck closure, use `RetryPolicy::with_timeout`. External callers (scheduler, CLI, signal handler) cancel by calling `token.cancel()` on any clone of the token.
+
 ## What is NOT in v0
 
-- **No scheduler.** Workflows run in-process, one at a time. The scheduler arrives in Week 3 along with budget enforcement and cancellation.
+- **No scheduler.** Workflows run in-process, one at a time. The scheduler arrives in Week 4.
 - **No LLM caching.** `LlmCallCompleted` is reserved in the event enum but not wired up until the LLM provider lands in Week 4.
 - **No sub-workflows.** `parent_id` is a placeholder column.
 - **No distributed workers.** Single process only. Multi-node is post-v0.
