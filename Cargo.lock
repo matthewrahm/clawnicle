@@ -72,6 +72,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawnicle-llm"
+version = "0.0.1"
+dependencies = [
+ "clawnicle-core",
+ "tokio",
+]
+
+[[package]]
 name = "clawnicle-runtime"
 version = "0.0.1"
 dependencies = [
