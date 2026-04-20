@@ -16,6 +16,18 @@ pub struct WorkflowSummary {
     pub event_count: i64,
 }
 
+/// A workflow picked up from the pending queue by [`Journal::claim_next_pending`].
+///
+/// The scheduler hands these fields back to the registered handler: the
+/// `input` JSON value goes to the workflow function, and the `id` and `name`
+/// flow into the `Context` the handler runs against.
+#[derive(Debug, Clone)]
+pub struct ClaimedWorkflow {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
 pub struct Journal {
     conn: Connection,
 }
@@ -146,6 +158,98 @@ impl Journal {
             )
             .optional()
             .map_err(journal_err)
+    }
+
+    /// Submit a workflow to the pending queue. The row is created with
+    /// `status = 'pending'` and NO events (WorkflowStarted is emitted at
+    /// claim time, not submit time).
+    pub fn submit_pending(
+        &mut self,
+        name: &str,
+        workflow_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<()> {
+        let now = now_ms();
+        let input_json = serde_json::to_string(input)?;
+        let input_hash = hash_input(&input_json);
+        self.conn
+            .execute(
+                r#"INSERT INTO workflows
+                     (id, name, status, input_hash, input_json, parent_id, created_at, updated_at)
+                   VALUES (?1, ?2, 'pending', ?3, ?4, NULL, ?5, ?5)"#,
+                params![workflow_id, name, input_hash, input_json, now],
+            )
+            .map_err(journal_err)?;
+        Ok(())
+    }
+
+    /// Atomically pick the oldest pending workflow, flip it to `running`,
+    /// and append its [`EventPayload::WorkflowStarted`] event.
+    ///
+    /// Returns `None` if nothing is pending. Uses `BEGIN IMMEDIATE` so
+    /// multiple scheduler workers (or multiple processes) cannot claim the
+    /// same row.
+    pub fn claim_next_pending(&mut self) -> Result<Option<ClaimedWorkflow>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(journal_err)?;
+
+        let claimed: Option<(String, String, String, String)> = tx
+            .query_row(
+                r#"SELECT id, name, input_hash, input_json
+                   FROM workflows
+                   WHERE status = 'pending'
+                   ORDER BY created_at ASC
+                   LIMIT 1"#,
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(journal_err)?;
+
+        let Some((id, name, input_hash, input_json)) = claimed else {
+            tx.commit().map_err(journal_err)?;
+            return Ok(None);
+        };
+
+        let now = now_ms();
+        tx.execute(
+            "UPDATE workflows SET status = 'running', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+        .map_err(journal_err)?;
+
+        let payload = EventPayload::WorkflowStarted {
+            name: name.clone(),
+            input_hash,
+        };
+        append_in_tx(&tx, &id, &payload, now)?;
+
+        tx.commit().map_err(journal_err)?;
+
+        let input: serde_json::Value = if input_json.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&input_json)?
+        };
+
+        Ok(Some(ClaimedWorkflow { id, name, input }))
+    }
+
+    /// Reset any workflow stuck in `running` back to `pending`. Called by
+    /// the scheduler on startup to pick up workflows abandoned by a prior
+    /// process crash.
+    pub fn recover_abandoned(&mut self) -> Result<u64> {
+        let now = now_ms();
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE workflows SET status = 'pending', updated_at = ?1 WHERE status = 'running'",
+                params![now],
+            )
+            .map_err(journal_err)?;
+        Ok(affected as u64)
     }
 
     pub fn workflow_status(&self, workflow_id: &str) -> Result<Option<String>> {
@@ -303,6 +407,14 @@ fn append_in_tx(
 
 fn journal_err(e: rusqlite::Error) -> Error {
     Error::Journal(e.to_string())
+}
+
+fn hash_input(input_json: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    input_json.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 fn now_ms() -> i64 {
@@ -546,6 +658,98 @@ mod tests {
                 .lookup_completed_llm_call("wf", "other-hash")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn submit_and_claim_pending_runs_workflow_lifecycle() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+
+        // queue empty → claim returns None
+        assert!(journal.claim_next_pending().unwrap().is_none());
+
+        journal
+            .submit_pending("scan", "wf-1", &serde_json::json!({ "mint": "abc" }))
+            .unwrap();
+        journal
+            .submit_pending("scan", "wf-2", &serde_json::json!({ "mint": "def" }))
+            .unwrap();
+
+        // Both workflows show status='pending', with no events yet.
+        assert_eq!(
+            journal.workflow_status("wf-1").unwrap().as_deref(),
+            Some("pending")
+        );
+        assert_eq!(journal.read_all("wf-1").unwrap().len(), 0);
+
+        // First claim returns the oldest.
+        let first = journal.claim_next_pending().unwrap().unwrap();
+        assert_eq!(first.id, "wf-1");
+        assert_eq!(first.input, serde_json::json!({ "mint": "abc" }));
+        assert_eq!(
+            journal.workflow_status("wf-1").unwrap().as_deref(),
+            Some("running")
+        );
+
+        // WorkflowStarted event was emitted at claim time.
+        let events = journal.read_all("wf-1").unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].payload,
+            EventPayload::WorkflowStarted { .. }
+        ));
+
+        // Second claim returns wf-2; third returns None.
+        let second = journal.claim_next_pending().unwrap().unwrap();
+        assert_eq!(second.id, "wf-2");
+        assert!(journal.claim_next_pending().unwrap().is_none());
+    }
+
+    #[test]
+    fn recover_abandoned_moves_running_back_to_pending() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+        journal
+            .submit_pending("scan", "a", &serde_json::Value::Null)
+            .unwrap();
+        journal
+            .submit_pending("scan", "b", &serde_json::Value::Null)
+            .unwrap();
+        journal.claim_next_pending().unwrap();
+        journal.claim_next_pending().unwrap();
+
+        assert_eq!(
+            journal.workflow_status("a").unwrap().as_deref(),
+            Some("running")
+        );
+        let recovered = journal.recover_abandoned().unwrap();
+        assert_eq!(recovered, 2);
+        assert_eq!(
+            journal.workflow_status("a").unwrap().as_deref(),
+            Some("pending")
+        );
+
+        // Completed workflows are untouched by a second recovery pass.
+        journal
+            .submit_pending("scan", "c", &serde_json::Value::Null)
+            .unwrap();
+        let claimed = journal.claim_next_pending().unwrap().unwrap();
+        journal
+            .append(
+                &claimed.id,
+                &EventPayload::WorkflowCompleted {
+                    output: serde_json::Value::Null,
+                },
+            )
+            .unwrap();
+
+        // claimed is now 'completed'; the other two (b and c, or similar) sit
+        // in 'pending'. Nothing is 'running', so recover_abandoned moves 0.
+        assert_eq!(journal.recover_abandoned().unwrap(), 0);
+        assert_eq!(
+            journal.workflow_status(&claimed.id).unwrap().as_deref(),
+            Some("completed")
         );
     }
 

@@ -6,12 +6,16 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS workflows (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
-    status      TEXT NOT NULL,
+    status      TEXT NOT NULL,  -- 'pending' | 'running' | 'completed' | 'failed'
     input_hash  TEXT NOT NULL,
+    input_json  TEXT NOT NULL DEFAULT '',
     parent_id   TEXT,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_workflows_status_created
+    ON workflows(status, created_at);
 
 CREATE TABLE IF NOT EXISTS events (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
