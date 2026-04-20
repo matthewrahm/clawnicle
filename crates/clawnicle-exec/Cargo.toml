@@ -1,0 +1,18 @@
+[package]
+name = "clawnicle-exec"
+description = "Workflow scheduler + crash-recovery for Clawnicle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+clawnicle-core = { workspace = true }
+clawnicle-journal = { workspace = true }
+clawnicle-runtime = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -261,6 +261,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawnicle-exec"
+version = "0.0.1"
+dependencies = [
+ "clawnicle-core",
+ "clawnicle-journal",
+ "clawnicle-runtime",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "clawnicle-journal"
 version = "0.0.1"
 dependencies = [
