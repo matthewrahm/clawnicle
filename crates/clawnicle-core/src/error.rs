@@ -16,6 +16,12 @@ pub enum Error {
 
     #[error("workflow not found: {0}")]
     WorkflowNotFound(String),
+
+    #[error("budget exceeded: {0}")]
+    BudgetExceeded(&'static str),
+
+    #[error("workflow cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
