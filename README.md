@@ -1,5 +1,8 @@
 # Clawnicle
 
+[![ci](https://github.com/matthewrahm/clawnicle/actions/workflows/ci.yml/badge.svg)](https://github.com/matthewrahm/clawnicle/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Save and resume for AI agents.**
 
 When an AI agent is in the middle of a long task (pulling data from APIs, calling a model, searching the web) and something goes wrong (the process dies, the network drops, the model returns a 500), Clawnicle remembers the steps that already succeeded. When you restart, those steps are skipped and the agent picks up from where it stopped. No replaying expensive LLM calls you already paid for. No repeating work you already did.
