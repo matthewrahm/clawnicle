@@ -99,6 +99,16 @@ Deliberately NOT enforced at call-success time: a call that completes gets its o
 
 Budget state is per-session — a process restart resets wallclock to zero. Tokens and USD could be reconstructed from journaled `LlmCallCompleted` events on resume; wallclock is inherently process-local. (Reconstruction is not implemented in v0.)
 
+## LLM completions and prompt caching
+
+`Context::complete_llm(step_id, provider, request)` takes any type implementing `clawnicle_llm::LlmProvider` (a native async trait using return-position `impl Future`). On the first call, the provider is invoked and an `LlmCallCompleted` event is appended carrying the model, SHA-256 prompt hash (stable hash of `(model, messages, temperature, max_tokens)`), response text, and token counts in/out.
+
+On any subsequent call — same process or after restart — where a `LlmCallCompleted` event with the same prompt hash exists for this workflow, the cached response is returned and the provider is not touched.
+
+Token counts from a fresh call are charged against the workflow budget via `charge_tokens`. Cache hits are NOT re-charged: budgets are per-session in v0, and reconstruction from the journal is a v1 concern. This means a workflow that budget-fails in the middle, is resumed on a new process, and reaches cached LLM calls will underreport usage versus the true historical spend — a trade-off for simplicity.
+
+Invalidation of the cache is by changing the hash: editing the prompt, switching models, or changing temperature all produce a new key. There is no explicit "bust this cache entry" API; `step_id` uniqueness is not required for LLM calls (it is informational only — the prompt hash is the real key).
+
 ## Cancellation
 
 `CancelToken` is a cloneable `Arc<AtomicBool>`. Any clone can flip the flag. Attach one via `Context::with_cancel_token`; the runtime polls the flag at the same suspension points as budget enforcement:

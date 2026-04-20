@@ -4,7 +4,7 @@ Durable agent runtime for Rust. Write LLM agent workflows as ordinary async func
 
 > Temporal's durable-execution model, redesigned for LLM agents.
 
-**Status:** v0 in progress. Weeks 1–3 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, `call_with_retry` (exponential backoff + per-attempt timeout), per-workflow budgets (tokens / USD / wallclock) with cooperative cancellation via `CancelToken`, and a runnable crash-and-resume demo.
+**Status:** v0 in progress. Weeks 1–4 shipped: workspace, event schema, SQLite journal, `Context` API, replay engine with step-level short-circuit, `call_with_retry` (exponential backoff + per-attempt timeout), per-workflow budgets (tokens / USD / wallclock) with cooperative cancellation via `CancelToken`, `complete_llm` with journal-backed prompt caching and `LlmProvider` trait, `clawnicle` CLI for inspecting journals, and a runnable crash-and-resume demo.
 
 ## Why
 
@@ -34,9 +34,11 @@ async fn scan_token(cx: Context, token: TokenId) -> Result<Verdict> {
 
 ```
 crates/
-  clawnicle-core       → event model, errors, shared types
+  clawnicle-core       → event model, errors, retry/budget/cancel/llm types
   clawnicle-journal    → SQLite-backed append-only event log
-  clawnicle-runtime    → Context API + replay engine
+  clawnicle-llm        → LlmProvider trait + MockProvider
+  clawnicle-runtime    → Context API + replay engine + LLM caching
+  clawnicle-cli        → `clawnicle` binary for inspecting journals
 examples/
   hello                → minimal two-event workflow trace
   resume-demo          → three-step workflow that crashes and resumes
@@ -58,9 +60,14 @@ cargo run -p hello-clawnicle
 cargo run -p resume-demo
 CLAWNICLE_HEAL=1 cargo run -p resume-demo
 cargo run -p resume-demo  # already-complete path
+
+# Inspect the resulting journal
+cargo run -p clawnicle-cli -- --db resume-demo.clawnicle.db list
+cargo run -p clawnicle-cli -- --db resume-demo.clawnicle.db show   demo-1
+cargo run -p clawnicle-cli -- --db resume-demo.clawnicle.db events demo-1
 ```
 
-Read [`docs/architecture.md`](docs/architecture.md) for the event model, replay semantics, and determinism contract.
+Read [`docs/architecture.md`](docs/architecture.md) for the event model, replay semantics, determinism contract, retry/budget/cancel semantics, and LLM prompt-cache model.
 
 ## License
 
