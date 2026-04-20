@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use clawnicle_core::{Error, EventPayload, Result, RetryPolicy};
+use clawnicle_core::{Budget, BudgetUsage, Error, EventPayload, Result, RetryPolicy};
 use clawnicle_journal::Journal;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -10,6 +10,8 @@ use serde::de::DeserializeOwned;
 pub struct Context {
     workflow_id: String,
     journal: Journal,
+    budget: Budget,
+    usage: BudgetUsage,
 }
 
 impl Context {
@@ -31,11 +33,49 @@ impl Context {
         Ok(Self {
             workflow_id,
             journal,
+            budget: Budget::unlimited(),
+            usage: BudgetUsage::zero(),
         })
     }
 
     pub fn workflow_id(&self) -> &str {
         &self.workflow_id
+    }
+
+    /// Attach a per-workflow [`Budget`]. Builder-style so it chains off
+    /// `open_or_start`.
+    pub fn with_budget(mut self, budget: Budget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    pub fn budget(&self) -> &Budget {
+        &self.budget
+    }
+
+    pub fn usage(&self) -> &BudgetUsage {
+        &self.usage
+    }
+
+    /// Add to the token counter. Returns Err(BudgetExceeded) if the new total
+    /// breaches the budget cap. LLM provider integrations (Week 4) will call
+    /// this after each completion.
+    pub fn charge_tokens(&mut self, n: u64) -> Result<()> {
+        self.usage.tokens = self.usage.tokens.saturating_add(n);
+        self.check_budget()
+    }
+
+    /// Add to the USD counter in micros (1 USD = 1_000_000 micros).
+    pub fn charge_usd_micros(&mut self, n: u64) -> Result<()> {
+        self.usage.usd_micros = self.usage.usd_micros.saturating_add(n);
+        self.check_budget()
+    }
+
+    fn check_budget(&self) -> Result<()> {
+        if let Some(field) = self.usage.exceeds(&self.budget) {
+            return Err(Error::BudgetExceeded(field));
+        }
+        Ok(())
     }
 
     /// Returns the cached final output if the workflow has already completed.
@@ -129,6 +169,8 @@ impl Context {
             return Ok(serde_json::from_value(cached)?);
         }
 
+        self.check_budget()?;
+
         let mut attempt: u32 = 0;
         let mut backoff = policy.initial_backoff;
 
@@ -156,6 +198,8 @@ impl Context {
             };
             let duration_ms = start.elapsed().as_millis() as u64;
 
+            self.usage.wallclock_ms = self.usage.wallclock_ms.saturating_add(duration_ms);
+
             match result {
                 Ok(out) => {
                     let out_value = serde_json::to_value(&out)?;
@@ -182,6 +226,8 @@ impl Context {
                     if attempt >= policy.max_attempts {
                         return Err(Error::Tool(msg));
                     }
+
+                    self.check_budget()?;
 
                     tokio::time::sleep(backoff).await;
                     backoff = Duration::from_secs_f32(
@@ -429,6 +475,50 @@ mod tests {
             .await;
 
         assert!(matches!(res, Err(Error::Tool(ref m)) if m.contains("timeout")));
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_after_tokens_charged_past_cap() {
+        use clawnicle_core::Budget;
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h")
+            .unwrap()
+            .with_budget(Budget::unlimited().with_max_tokens(1000));
+
+        cx.charge_tokens(600).unwrap();
+        cx.charge_tokens(300).unwrap();
+        let over = cx.charge_tokens(200);
+        assert!(matches!(over, Err(Error::BudgetExceeded("tokens"))));
+        assert_eq!(cx.usage().tokens, 1100);
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_blocks_next_call() {
+        use clawnicle_core::Budget;
+
+        let dir = tempdir().unwrap();
+        let journal = Journal::open(dir.path().join("j.db")).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h")
+            .unwrap()
+            .with_budget(Budget::unlimited().with_max_wallclock_ms(50));
+
+        let slow: std::result::Result<u32, Error> = cx
+            .call::<u32, _, _, std::io::Error>("slow", || async {
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                Ok(1)
+            })
+            .await;
+        assert!(slow.is_ok(), "first call still runs and records time");
+
+        let next: std::result::Result<u32, Error> = cx
+            .call::<u32, _, _, std::io::Error>("next", || async { Ok(2) })
+            .await;
+        assert!(
+            matches!(next, Err(Error::BudgetExceeded("wallclock"))),
+            "next call must be refused because wallclock cap is already breached"
+        );
     }
 
     #[tokio::test]
