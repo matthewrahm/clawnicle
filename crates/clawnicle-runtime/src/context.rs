@@ -38,6 +38,36 @@ impl Context {
         &self.workflow_id
     }
 
+    /// Returns the cached final output if the workflow has already completed.
+    ///
+    /// Used at the top of a workflow function to short-circuit replay when
+    /// the workflow previously ran to completion in an earlier process.
+    pub fn cached_final_output(&self) -> Result<Option<serde_json::Value>> {
+        if self.journal.workflow_status(&self.workflow_id)?.as_deref() != Some("completed") {
+            return Ok(None);
+        }
+        for event in self.journal.read_all(&self.workflow_id)? {
+            if let EventPayload::WorkflowCompleted { output } = event.payload {
+                return Ok(Some(output));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Mark the workflow completed with the given output. Idempotent — if
+    /// the workflow is already in terminal state, this is a no-op.
+    pub fn complete<T: Serialize>(&mut self, output: &T) -> Result<()> {
+        if self.journal.workflow_status(&self.workflow_id)?.as_deref() == Some("completed") {
+            return Ok(());
+        }
+        let value = serde_json::to_value(output)?;
+        self.journal.append(
+            &self.workflow_id,
+            &EventPayload::WorkflowCompleted { output: value },
+        )?;
+        Ok(())
+    }
+
     /// Execute a tool call, journaling start and outcome.
     ///
     /// The `step_id` is the idempotency key — the unit used by the replay
@@ -175,6 +205,45 @@ mod tests {
 
         assert_eq!(out, 42, "replay must return cached output, not re-execute");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "closure ran exactly once");
+    }
+
+    #[tokio::test]
+    async fn complete_then_cached_final_output_returns_value() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("j.db");
+
+        {
+            let journal = Journal::open(&db_path).unwrap();
+            let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+            assert_eq!(cx.cached_final_output().unwrap(), None);
+            cx.complete(&serde_json::json!({ "total": 9 })).unwrap();
+        }
+
+        let journal = Journal::open(&db_path).unwrap();
+        let cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+        assert_eq!(
+            cx.cached_final_output().unwrap(),
+            Some(serde_json::json!({ "total": 9 }))
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_is_idempotent_on_replay() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("j.db");
+        let journal = Journal::open(&db_path).unwrap();
+        let mut cx = Context::open_or_start(journal, "wf", "demo", "h").unwrap();
+        cx.complete(&7u32).unwrap();
+        cx.complete(&7u32).unwrap();
+        cx.complete(&999u32).unwrap(); // second complete must not overwrite
+
+        let journal = Journal::open(&db_path).unwrap();
+        let events = journal.read_all("wf").unwrap();
+        let completed_count = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::WorkflowCompleted { .. }))
+            .count();
+        assert_eq!(completed_count, 1, "exactly one WorkflowCompleted event");
     }
 
     #[tokio::test]
