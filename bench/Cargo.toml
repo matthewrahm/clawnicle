@@ -1,0 +1,30 @@
+[package]
+name = "clawnicle-bench"
+description = "Criterion benchmarks for Clawnicle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+clawnicle-core = { workspace = true }
+clawnicle-journal = { workspace = true }
+clawnicle-llm = { workspace = true }
+clawnicle-runtime = { workspace = true }
+criterion = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "journal_write"
+harness = false
+
+[[bench]]
+name = "runtime_call"
+harness = false
