@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Cooperative cancellation handle. Cloneable; all clones share one flag.
 ///
-/// Workflow authors pass a CancelToken into a [`Context`] via
+/// Workflow authors pass a `CancelToken` into a `Context` via
 /// `Context::with_cancel_token`; external callers (scheduler, CLI, signal
 /// handler) flip the flag by calling [`CancelToken::cancel`]. The runtime
-/// checks the flag at natural suspension points — specifically before each
-/// tool-call attempt — and returns `Error::Cancelled` when set.
+/// checks the flag at natural suspension points, specifically before each
+/// tool-call attempt, and returns `Error::Cancelled` when set.
 ///
 /// Cancellation is cooperative: user closures themselves are not interrupted
 /// mid-await. If a closure is stuck, a per-attempt timeout (via
