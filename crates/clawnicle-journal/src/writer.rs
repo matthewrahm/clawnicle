@@ -124,6 +124,52 @@ impl Journal {
         }
     }
 
+    pub fn lookup_completed_llm_call(
+        &self,
+        workflow_id: &str,
+        prompt_hash: &str,
+    ) -> Result<Option<clawnicle_core::LlmResponse>> {
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                r#"SELECT payload
+                   FROM events
+                   WHERE workflow_id = ?1
+                     AND kind = 'llm_call_completed'
+                     AND json_extract(payload, '$.prompt_hash') = ?2
+                   ORDER BY sequence ASC
+                   LIMIT 1"#,
+                params![workflow_id, prompt_hash],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(journal_err)?;
+
+        match row {
+            Some(payload_json) => {
+                let payload: EventPayload = serde_json::from_str(&payload_json)?;
+                if let EventPayload::LlmCallCompleted {
+                    model,
+                    response,
+                    tokens_in,
+                    tokens_out,
+                    ..
+                } = payload
+                {
+                    Ok(Some(clawnicle_core::LlmResponse {
+                        model,
+                        content: response,
+                        tokens_in,
+                        tokens_out,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn read_all(&self, workflow_id: &str) -> Result<Vec<Event>> {
         let mut stmt = self
             .conn
@@ -353,6 +399,50 @@ mod tests {
                 .lookup_completed_tool_call("b", "shared-key")
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn lookup_completed_llm_call_returns_response() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("j.db")).unwrap();
+        journal.start_workflow("wf", "t", "h", None).unwrap();
+
+        assert!(
+            journal
+                .lookup_completed_llm_call("wf", "abc123")
+                .unwrap()
+                .is_none()
+        );
+
+        journal
+            .append(
+                "wf",
+                &EventPayload::LlmCallCompleted {
+                    step_id: "s1".into(),
+                    model: "claude-haiku-4-5".into(),
+                    prompt_hash: "abc123".into(),
+                    response: "hello world".into(),
+                    tokens_in: 42,
+                    tokens_out: 7,
+                },
+            )
+            .unwrap();
+
+        let hit = journal
+            .lookup_completed_llm_call("wf", "abc123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.content, "hello world");
+        assert_eq!(hit.tokens_in, 42);
+        assert_eq!(hit.tokens_out, 7);
+        assert_eq!(hit.model, "claude-haiku-4-5");
+
+        assert!(
+            journal
+                .lookup_completed_llm_call("wf", "other-hash")
+                .unwrap()
+                .is_none()
         );
     }
 
