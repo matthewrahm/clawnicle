@@ -1,14 +1,20 @@
 # Clawnicle
 
-**Durable agent runtime for Rust.** Write an LLM-agent workflow as an ordinary async Rust function; the runtime journals every tool call, LLM completion, and decision to an append-only event log. When the process crashes and the workflow reopens, execution resumes from the last successful step — without re-running work that already completed.
+**Save and resume for AI agents.**
 
-> Temporal's durable-execution model, redesigned for LLM agents.
+When an AI agent is in the middle of a long task (pulling data from APIs, calling a model, searching the web) and something goes wrong (the process dies, the network drops, the model returns a 500), Clawnicle remembers the steps that already succeeded. When you restart, those steps are skipped and the agent picks up from where it stopped. No replaying expensive LLM calls you already paid for. No repeating work you already did.
+
+Think of it as save points for agents.
 
 ![crash-and-resume demo](docs/resume-demo.gif)
 
-*Three runs of the bundled demo: the first crashes at step-b; the second resumes (step-a short-circuits from the journal, step-b retries, step-c runs fresh); and `clawnicle events` shows the full trace including the failed attempt.*
+*The bundled "research agent" runs four steps: search for articles, extract key points, write a summary, review. In the first run, step 3 crashes. In the second run, the two previously successful steps show "skipped (already done)" and the agent picks up from step 3.*
 
 ---
+
+## For engineers
+
+Clawnicle is a Rust library. You write your agent workflow as a normal async function that takes a `Context`. Every tool call and LLM completion goes through that `Context`, which journals the event to an append-only SQLite log. On restart the library re-runs the function from the top; any step whose completion event is already in the journal short-circuits from the cached output without re-executing the closure. It is Temporal's durable-execution model, redesigned for LLM agents.
 
 ## What it gives you
 
